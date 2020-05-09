@@ -552,7 +552,7 @@ import weeutil.weeutil
 from weewx.engine import StdService
 from weewx.cheetahgenerator import SearchList
 
-VERSION = "3.4.0b2"
+VERSION = "3.4.0b2.1"
 
 if weewx.__version__ < "4":
     raise weewx.UnsupportedFeature(
@@ -747,27 +747,27 @@ def mkdir_p(path):
    windDir    D        windDir       winddir16Point windBearing
    windSpeed  S        windSpeedMPH  windspeedMiles windSpeed
    windGust   G        windGustMPH   WindGustMiles  windGust
-   windChar   
+   windChar
    clouds                            cloudcover     cloudCover
    pop        Pp       pop                          precipProbability
    qpf                 precipIN      precipMM
    qsf                 showIN                       precipAccumulation
-   rain       
-   rainshwrs  
-   tstms      
-   drizzle    
-   snow       
-   snowshwrs  
-   flurries   
-   sleet      
-   frzngrain  
-   frzngdrzl  
-   hail       
-   obvis      
+   rain
+   rainshwrs
+   tstms
+   drizzle
+   snow
+   snowshwrs
+   flurries
+   sleet
+   frzngrain
+   frzngdrzl
+   hail
+   obvis
    windChill                         WindChillF
    heatIndex                         HeatIndexF
    uvIndex    U        uvi                          uvIndex
-   airQuality 
+   airQuality
 """
 
 schema = [('method',     'VARCHAR(10) NOT NULL'),
@@ -2545,8 +2545,8 @@ class DSForecast(Forecast):
 # -----------------------------------------------------------------------------
 
 WU_KEY = 'WU'
-WU_DEFAULT_URL = 'http://api.wunderground.com/api'
-
+#WU_DEFAULT_URL = 'http://api.wunderground.com/api'
+WU_DEFAULT_URL = 'https://api.weather.com/v3/wx/forecast/daily/5day?'
 class WUForecast(Forecast):
 
     def __init__(self, engine, config_dict):
@@ -2616,7 +2616,8 @@ class WUForecast(Forecast):
         max_tries - how many times to try before giving up
         """
 
-        u = '%s/%s/%s/q/%s.json' % (url, api_key, fc_type, location) \
+        #u = '%s/%s/%s/q/%s.json' % (url, api_key, fc_type, location) \
+        u = '%s%s&format=json&units=e&language=en-US&apiKey=%s' % (url, location, api_key) \
             if url == WU_DEFAULT_URL else url
         masked = Forecast.get_masked_url(u, api_key)
         loginf("%s: download forecast from '%s'" % (WU_KEY, masked))
@@ -2636,12 +2637,12 @@ class WUForecast(Forecast):
     @staticmethod
     def parse(text, issued_ts=None, now=None, location=None):
         obj = json.loads(text)
-        if not 'response' in obj:
-            msg = "%s: no 'response' in json object" % WU_KEY
+        if not 'dayOfWeek' in obj:
+            msg = "%s: no 'dayOfWeek' in json object" % WU_KEY
             logerr(msg)
             return [], [msg]
-        response = obj['response']
-        if 'error' in response:
+        #response = obj['response']
+        if 'error' in obj:
             msg = '%s: error in response: %s: %s' % (
                 WU_KEY, response['error']['type'],
                 response['error']['description'])
@@ -2663,10 +2664,92 @@ class WUForecast(Forecast):
         elif 'forecast' in obj:
             records, msgs = WUForecast.create_records_from_daily(
                 obj, issued_ts, now, location=location)
+        elif 'validTimeUtc' in obj:
+            records, msgs = WUForecast.create_records_from_2019WUAPI(
+                obj, issued_ts, now, location=location)
+            logdbg('New WU API returned %s records'%(len(records)))
         else:
             msg = "%s: cannot find 'hourly_forecast' or 'forecast'" % WU_KEY
             logerr(msg)
             msgs.append(msg)
+        return records, msgs
+
+    @staticmethod
+    def create_records_from_2019WUAPI(fc, issued_ts, now, location=None):
+        """create from hourly10day"""
+        msgs = []
+        records = []
+        cnt = 0
+        logdbg('Parsing WU new file format len %d'%(len(fc['dayOfWeek'])))
+        for period in range(0,2*len(fc['dayOfWeek'])-1):
+            try:
+                cnt += 1
+                r = {}
+                DayPart=fc['daypart'][0]
+                logdbg('Parsing WU record %d'%(period))
+                r['method'] = WU_KEY
+                r['usUnits'] = weewx.US
+                r['dateTime'] = now
+                r['issued_ts'] = issued_ts
+                r['event_ts'] = Forecast.str2int(
+                    'epoch', fc['validTimeUtc'][0]+12*3600*period, WU_KEY)
+                logdbg('event_ts %d'%(r['event_ts']))
+                r['duration'] = 12*3600
+                logdbg('duration %d'%(r['duration']))
+                logdbg('raw clouds %s'%(DayPart['cloudCover'][period]))
+                clouds=DayPart['cloudCover'][period]
+                if clouds:
+                    r['clouds'] = Forecast.pct2clouds(DayPart['cloudCover'][period])
+                    logdbg('clouds %s'%(r['clouds']))
+                logdbg('raw temp %s'%(DayPart['temperature']))
+                temp=DayPart['temperature'][period]
+                if temp:
+                    r['temp'] = Forecast.str2float('temp', temp, WU_KEY)
+                #r['dewpoint'] = Forecast.str2float(
+                #    'dewpoint', period['dewpoint']['english'], WU_KEY)
+                humidity = DayPart['relativeHumidity'][period]
+                logdbg('raw humidity %s'%(humidity))
+                if humidity:
+                    r['humidity'] = Forecast.str2int('humidity', humidity, WU_KEY)
+                windspeed=DayPart['windSpeed'][period]
+                logdbg('raw windspeed %s'%(windspeed))
+                if windspeed:
+                    r['windSpeed'] = Forecast.str2float(
+                        'wspd', windspeed, WU_KEY)
+                winddir=DayPart['windDirectionCardinal'][period]
+                logdbg('raw winddir %s'%(winddir))
+                if winddir:
+                    r['windDir'] = winddir
+                pop = DayPart['precipChance'][period]
+                logdbg('raw pop %s'%(pop))
+                if pop:
+                    r['pop'] = Forecast.str2int('pop', pop, WU_KEY)
+                qpf = DayPart['qpf'][period]
+                logdbg('raw qpf %s'%(qpf))
+                if qpf:
+                    r['qpf'] = Forecast.str2float(
+                        'qpf', qpf, WU_KEY)
+                qsf = DayPart['qpfSnow'][period]
+                logdbg('raw qsf %s'%(qsf))
+                if qsf:
+                    r['qsf'] = Forecast.str2float('snow', qsf, WU_KEY)
+                #r['obvis'] = WUForecast.wu2obvis(period)
+                #r['uvIndex'] = Forecast.str2int('uvi', period['uvi'], WU_KEY)
+                #r.update(WUForecast.wu2precip(period))
+                logdbg('location %s'%(location))
+                if location is not None:
+                    r['location'] = location
+                records.append(r)
+                loginf(' New forecast record %d %s'% (cnt,r))
+            except KeyError as e:
+                msg = '%s: failure in forecast period %d: %s' % (
+                    WU_KEY, cnt, e)
+                msgs.append(msg)
+                logerr(msg)
+            except:
+                logdbg("Oops! %s"%(sys.exc_info()[0]))
+
+
         return records, msgs
 
     @staticmethod
